@@ -1,7 +1,6 @@
 import streamlit as st
 import yfinance as yf
 import pandas as pd
-import ta
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
@@ -12,66 +11,74 @@ st.title("📈 실시간 대응 주식 투자 대시보드")
 # 2. 사이드바 - 제어 컨트롤러
 st.sidebar.header("🕹️ 세팅 컨트롤러")
 ticker = st.sidebar.text_input("종목 코드 입력 (삼성전자: 005930.KS)", value="005930.KS")
-period = st.sidebar.selectbox("데이터 기간 (에러 방지를 위해 1mo 이상 추천)", ["5d", "1mo", "3mo", "1y"], index=1)
-interval = st.sidebar.selectbox("데이터 봉 주기", ["1m", "5m", "15m", "1d"], index=3)
+# 안전한 계산을 위해 기본 조회 기간을 3개월(3mo)로 변경합니다.
+period = st.sidebar.selectbox("데이터 기간", ["3mo", "1y", "1mo", "5d"], index=0)
+interval = st.sidebar.selectbox("데이터 봉 주기", ["1d", "15m", "5m", "1m"], index=0)
 
 rsi_window = st.sidebar.slider("RSI 기간", 5, 30, 14)
 bb_window = st.sidebar.slider("볼린저 밴드 기간", 5, 50, 20)
 
-# 3. 데이터 로드 및 에러 방지 안전장치
+# 3. 데이터 로드 및 순수 판다스 지표 계산
 @st.cache_data(ttl=30)
-def load_clean_data(symbol, p, i):
+def load_bulletproof_data(symbol, p, i):
     raw_data = yf.download(tickers=symbol, period=p, interval=i)
     if raw_data.empty:
         return pd.DataFrame()
     
-    # 1차원 데이터프레임으로 안전하게 재조립
-    df_final = pd.DataFrame(index=raw_data.index)
-    df_final['Open'] = raw_data['Open'].values.reshape(-1)
-    df_final['High'] = raw_data['High'].values.reshape(-1)
-    df_final['Low'] = raw_data['Low'].values.reshape(-1)
-    df_final['Close'] = raw_data['Close'].values.reshape(-1)
+    # 야후파이낸스 특유의 2차원 데이터를 1차원으로 강제 압축 정제
+    df_clean = pd.DataFrame(index=raw_data.index)
+    for col in ['Open', 'High', 'Low', 'Close']:
+        if col in raw_data.columns:
+            col_data = raw_data[col]
+            df_clean[col] = col_data.iloc[:, 0] if isinstance(col_data, pd.DataFrame) else col_data
     
-    # [IndexError 14 out of bounds 완벽 방어]
-    # 지표 계산에 필요한 최소한의 데이터 개수가 조달되었는지 확인합니다.
-    min_required = max(bb_window, rsi_window, 20)
-    if len(df_final) < min_required:
-        st.error(f"⚠️ 가져온 주가 데이터가 너무 적습니다 ({len(df_final)}개). 지표 계산을 위해 최소 {min_required}개 이상의 데이터가 필요하니, 왼쪽 사이드바에서 '데이터 기간'을 더 길게(예: 1mo 또는 3mo) 늘려주세요!")
-        return pd.DataFrame() # 빈 데이터 반환하여 아래 차트 생성을 안전하게 패스
+    # 데이터 개수가 부족하면 계산 생략
+    if len(df_clean) < max(bb_window, rsi_window) + 5:
+        return pd.DataFrame()
+        
+    # [외부 라이브러리 없이 직접 계산 - 에러 발생 확률 제거]
+    # 1. 볼린저 밴드 계산
+    ma = df_clean['Close'].rolling(window=bb_window).mean()
+    std = df_clean['Close'].rolling(window=bb_window).std()
+    df_clean['BB_High'] = ma + (std * 2)
+    df_clean['BB_Low'] = ma - (std * 2)
+    df_clean['MA20'] = ma
     
-    # 데이터가 충분할 때만 기술적 지표 계산
-    df_final['RSI'] = ta.momentum.rsi(df_final['Close'], window=rsi_window)
+    # 2. RSI 계산
+    delta = df_clean['Close'].diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.rolling(window=rsi_window).mean()
+    avg_loss = loss.rolling(window=rsi_window).mean()
+    rs = avg_gain / (avg_loss + 1e-10) # 0으로 나누기 방지
+    df_clean['RSI'] = 100 - (100 / (1 + rs))
     
-    bb = ta.volatility.BollingerBands(df_final['Close'], window=bb_window, window_dev=2)
-    df_final['BB_High'] = bb.bollinger_hband()
-    df_final['BB_Low'] = bb.bollinger_lband()
-    
-    adx = ta.trend.ADXIndicator(df_final['High'], df_final['Low'], df_final['Close'], window=14)
-    df_final['ADX'] = adx.adx()
-    
-    return df_final
+    return df_clean
 
-# 실행
-df = load_clean_data(ticker, period, interval)
+# 데이터 실행
+df = load_bulletproof_data(ticker, period, interval)
 
 if df.empty:
-    st.info("💡 사이드바의 세팅을 조정하면 실시간 데이터 조회가 재시도됩니다.")
+    st.error("⚠️ 데이터가 부족하거나 종목 코드가 올바르지 않습니다. 왼쪽 메뉴에서 '데이터 기간'을 3mo 나 1y로 늘려주세요!")
 else:
-    # 4. 실시간 상태 판독기 (Metrics)
+    # 4. 상단 실시간 계측기 (Metrics)
     c_price = float(df['Close'].iloc[-1])
     p_price = float(df['Close'].iloc[-2])
     diff = c_price - p_price
     c_rsi = float(df['RSI'].iloc[-1])
-    c_adx = float(df['ADX'].iloc[-1])
+    c_ma = float(df['MA20'].iloc[-1])
     
     col1, col2, col3, col4 = st.columns(4)
     col1.metric("현재가", f"{c_price:,.0f} 원", f"{diff:,.0f} 원")
     
-    if c_rsi >= 70: rsi_sig = "⚠️ 과매수 (매도)"
-    elif c_rsi <= 30: rsi_sig = "✅ 과매도 (매수)"
-    else: rsi_sig = "⚖️ 중립"
-    col2.metric("RSI 상태", f"{c_rsi:.1f}", rsi_sig, delta_color="off")
+    # RSI 신호 판정
+    if pd.isna(c_rsi): rsi_sig, rsi_val = "계산중", "0.0"
+    elif c_rsi >= 70: rsi_sig, rsi_val = "⚠️ 과매수 (매도)", f"{c_rsi:.1f}"
+    elif c_rsi <= 30: rsi_sig, rsi_val = "✅ 과매도 (매수)", f"{c_rsi:.1f}"
+    else: rsi_sig, rsi_val = "⚖️ 중립", f"{c_rsi:.1f}"
+    col2.metric("RSI 상태", rsi_val, rsi_sig, delta_color="off")
     
+    # 볼린저 밴드 판정
     b_high = float(df['BB_High'].iloc[-1])
     b_low = float(df['BB_Low'].iloc[-1])
     if c_price >= b_high: bb_sig = "🔥 상한선 돌파"
@@ -79,11 +86,14 @@ else:
     else: bb_sig = "➡️ 밴드 내부"
     col3.metric("볼린저 밴드", bb_sig)
     
-    if c_adx >= 25: adx_sig = "💪 강한 추세"
-    else: adx_sig = "💤 횡보/박스권"
-    col4.metric("추세 강도 (ADX)", f"{c_adx:.1f}", adx_sig, delta_color="off")
+    # 20일 이평선 기준 가격 위치 (추세 판정)
+    trend_pct = ((c_price - c_ma) / c_ma) * 100
+    if trend_pct > 1: trend_sig = "💪 상승 추세 우위"
+    elif trend_pct < -1: trend_sig = "📉 하락 추세 우위"
+    else: trend_sig = "💤 단기 횡보"
+    col4.metric("20일선 이격도", f"{trend_pct:+.1f}%", trend_sig, delta_color="off")
 
-    # 5. 시각화 차트
+    # 5. 인터랙티브 차트 시각화
     st.subheader("📊 실시간 차트 레이더")
     fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.1, row_heights=[0.7, 0.3])
     
