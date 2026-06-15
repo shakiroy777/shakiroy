@@ -27,18 +27,28 @@ def load_data(ticker, period, interval):
     if data.empty:
         return data
     
-    # 기술적 지표 계산 (ta 라이브러리 활용)
-    # RSI
-    data['RSI'] = ta.momentum.rsi(data['Close'], window=rsi_window)
-    # 볼린저 밴드
-    bb = ta.volatility.BollingerBands(data['Close'], window=bb_window, window_dev=2)
-    data['BB_High'] = bb.bollinger_hband()
-    data['BB_Low'] = bb.bollinger_lband()
-    # ADX (추세 강도)
-    adx = ta.trend.ADXIndicator(data['High'], data['Low'], data['Close'], window=14)
-    data['ADX'] = adx.adx()
+    # [핵심 수정 부분] yfinance 데이터가 2차원으로 들어오는 문제를 1차원(Series)으로 확실하게 압축해 줍니다.
+    close_series = pd.Series(data['Close'].values.flatten(), index=data.index)
+    high_series = pd.Series(data['High'].values.flatten(), index=data.index)
+    low_series = pd.Series(data['Low'].values.flatten(), index=data.index)
+    open_series = pd.Series(data['Open'].values.flatten(), index=data.index)
     
-    return data
+    # 1차원 데이터로 변환 후 데이터프레임 재생성
+    clean_df = pd.DataFrame({
+        'Open': open_series, 'High': high_series, 'Low': low_series, 'Close': close_series
+    }, index=data.index)
+    
+    # 기술적 지표 계산 (ta 라이브러리 활용)
+    clean_df['RSI'] = ta.momentum.rsi(clean_df['Close'], window=rsi_window)
+    
+    bb = ta.volatility.BollingerBands(clean_df['Close'], window=bb_window, window_dev=2)
+    clean_df['BB_High'] = bb.bollinger_hband()
+    clean_df['BB_Low'] = bb.bollinger_lband()
+    
+    adx = ta.trend.ADXIndicator(clean_df['High'], clean_df['Low'], clean_df['Close'], window=14)
+    clean_df['ADX'] = adx.adx()
+    
+    return clean_df
 
 df = load_data(ticker, period, interval)
 
